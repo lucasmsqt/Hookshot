@@ -56,16 +56,23 @@ def main():
         # make_game: work/pipeline_states.bin beside the game as hookshot_pipeline_states_shipped.bin, none when there is none
         make_game = load("make_game_under_test", ROOT / "nx2" / "make_game.py")
         game = os.path.join(d, "game")
+        local_work = os.path.join(d, "local-work")
         os.makedirs(game)
+        os.makedirs(local_work)
         make_game.ROOT = d
-        make_game.ship_state_list(game)
+        make_game.ship_state_list(game, local_work)
         if os.listdir(game):
             raise SystemExit("a list was shipped with none in work/")
         os.makedirs(os.path.join(d, "work"))
         os.replace(out, os.path.join(d, "work", "pipeline_states.bin"))
-        make_game.ship_state_list(game)
-        if tool.read(os.path.join(game, "hookshot_pipeline_states_shipped.bin")) != merged:
+        make_game.ship_state_list(game, local_work)
+        shipped = os.path.join(game, "hookshot_pipeline_states_shipped.bin")
+        if tool.read(shipped) != merged:
             raise SystemExit("make_game did not ship work/pipeline_states.bin")
+        Path(local_work, "pipeline_states.bin").write_bytes(head + rec(6, 7, 3))
+        make_game.ship_state_list(game, local_work)
+        if tool.read(shipped) != [rec(6, 7, 3)]:
+            raise SystemExit("make_game did not use the local --work pipeline state list")
     print("pipeline state list: record, merge and shipping ok")
 
 

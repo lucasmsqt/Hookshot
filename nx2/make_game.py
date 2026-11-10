@@ -946,12 +946,15 @@ def seed_pipelines(out):
     print("the shipped pipeline list: %d KB, built before the first title" % (os.path.getsize(seed) >> 10), flush=True)
 
 
-def ship_state_list(out):
-    """The pipeline state list made from a play of the game on the development PC (work/pipeline_states.bin: each pipeline's stage
-    code keys, vertex and target formats and draw state; hashes and state only, no game code), as the folder's
-    hookshot_pipeline_states_shipped.bin: the first start's shader preparation builds those pipelines before the title, from the
-    player's own shaders (hookshot_shaders.bin), instead of compiling each when it is first drawn. Good for any build: optional"""
-    src = os.path.join(ROOT, "work", "pipeline_states.bin")
+def ship_state_list(out, work):
+    """Use the local pipeline state list from --work, or the optional list bundled with the tools.
+
+    Shader preparation rebuilds these states before the title using the player's own shaders.
+    The list contains shader keys and draw state and works across renderer builds.
+    """
+    src = os.path.join(work, "pipeline_states.bin")
+    if not os.path.isfile(src):
+        src = os.path.join(ROOT, "work", "pipeline_states.bin")
     dst = os.path.join(out, "hookshot_pipeline_states_shipped.bin")
     if not os.path.isfile(src):
         return
@@ -1649,7 +1652,7 @@ def main(a=None):
     if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
         copy_writable(icon, os.path.join(out, "hookshot.png"))   # (a second build overwrites the first's)
     seed_pipelines(out)
-    ship_state_list(out)
+    ship_state_list(out, work)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
