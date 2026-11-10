@@ -378,6 +378,24 @@ def file_progress(verb, clock=time.monotonic):
     return progress
 
 
+HEADS = ".hookshot_romfs_heads"   # (the extraction's damaged .zs list, under the stamp of the unpack that made it)
+
+
+def keep_heads(out, game, stamp):
+    """nup.py's list of the romfs .zs files that do not start as zstd (its HEADS_NAME, beside the extracted romfs), kept in the
+    game folder under this unpack's stamp for stand_in_damaged_files: the ~100,000 files are then not opened again"""
+    import nup
+    made = os.path.join(game, nup.HEADS_NAME)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(os.path.join(out, HEADS))
+    if nup.read_heads(made) is None:
+        return
+    with open(made, encoding="utf-8") as f:
+        listed = f.read().partition("\n")[2]
+    with open(os.path.join(out, HEADS), "w", encoding="utf-8", newline="\n") as f:
+        f.write(stamp.strip() + "\n" + listed)
+
+
 def stand_in_damaged_files(out, romfs):
     """An incomplete dump's damaged textures replaced by whole ones of the same kind, and said: without them the game
     leaves out the walls and floors that use them (the Water Temple, #1002). Only in a romfs this builder unpacked (its
@@ -394,11 +412,25 @@ def stand_in_damaged_files(out, romfs):
             if f.read() == stamp:
                 return
     import nup
-    print("checking your game files for damaged textures (once after an unpack): every .zs file is opened, which can take "
-          "minutes", flush=True)
-    done = nup.stand_in_damaged(romfs, file_progress("checked"))
+    heads = os.path.join(out, HEADS)
+    known = None
+    try:
+        with open(heads, encoding="utf-8") as f:
+            first, _, rest = f.read().partition("\n")
+        if first == stamp.strip():   # (made by this unpack's extraction: nup.py HEADS_NAME)
+            known = nup.read_heads_text(rest)
+    except OSError:
+        pass
+    if known is None:
+        print("checking your game files for damaged textures (once after an unpack): every .zs file is opened, which can take "
+              "minutes", flush=True)
+        done = nup.stand_in_damaged(romfs, file_progress("checked"))
+    else:   # (found while the .nup was extracted: no file opened again)
+        done = nup.stand_in_damaged(romfs, damaged=[os.path.normpath(os.path.join(romfs, rel)) for rel in known])
     with open(checked, "w") as f:
         f.write(stamp)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(heads)
     if not done:
         return
     print("Your game dump is incomplete: %d game file%s in it %s damaged (a complete dump is about 23.8 GB, an incomplete "
@@ -946,21 +978,40 @@ def seed_pipelines(out):
     print("the shipped pipeline list: %d KB, built before the first title" % (os.path.getsize(seed) >> 10), flush=True)
 
 
-def ship_state_list(out, work):
-    """Use the local pipeline state list from --work, or the optional list bundled with the tools.
+def ship_state_list(out, work=None):
+    """Unpack the bundled pipeline state list, with an optional override from --work.
 
-    Shader preparation rebuilds these states before the title using the player's own shaders.
-    The list contains shader keys and draw state and works across renderer builds.
+    Shader preparation builds these states before the title from the player's own shaders.
+    A missing or unreadable local list falls back to the list bundled with the Builder.
     """
-    src = os.path.join(work, "pipeline_states.bin")
-    if not os.path.isfile(src):
-        src = os.path.join(ROOT, "work", "pipeline_states.bin")
+    import pipeline_states
     dst = os.path.join(out, "hookshot_pipeline_states_shipped.bin")
-    if not os.path.isfile(src):
+    sources = [os.path.join(ROOT, *pipeline_states.SHIPPED)]
+    if work is not None:
+        sources.insert(0, os.path.join(work, "pipeline_states.bin"))
+    for src in sources:
+        if not os.path.isfile(src):
+            continue
+        try:
+            data = pipeline_states.load(src)
+            n = len(pipeline_states.parse(data, src, strict=True))
+        except (OSError, SystemExit) as e:
+            print("the pipeline state list was left out: %s" % e, flush=True)
+            continue
+        if n:
+            break
+    else:
         return
-    if not (os.path.isfile(dst) and filecmp.cmp(src, dst, shallow=False)):
-        shutil.copyfile(src, dst)
-    print("the shipped pipeline state list: %d pipelines" % ((os.path.getsize(src) - 12) // 528), flush=True)
+    try:
+        with open(dst, "rb") as f:
+            same = f.read() == data
+    except OSError:
+        same = False
+    if not same:
+        with open(dst + ".new", "wb") as f:
+            f.write(data)
+        os.replace(dst + ".new", dst)
+    print("the shipped pipeline state list: %d pipelines" % n, flush=True)
 
 
 # (the builders read this line's start: the step was skipped or failed, and the shaders' row says so instead of a check mark)
@@ -1438,6 +1489,7 @@ def main(a=None):
             if os.path.exists(romfs):
                 shutil.rmtree(romfs)
             shutil.move(os.path.join(game, "romfs"), romfs)
+            keep_heads(out, game, stamp)
             shutil.move(staged_exefs, exefs)
             shutil.rmtree(game, ignore_errors=True)
             shutil.rmtree(kept, ignore_errors=True)
