@@ -145,10 +145,21 @@ def main():
         raise SystemExit("the fallback is not drawn as an ordinary vkCmdDraw")
     if "fallback_payload_address" not in draw or "MESH_FALLBACK_PAYLOAD_PUSH_OFFSET" not in draw:
         raise SystemExit("the fallback's buffer addresses are not pushed")
-    if "VK_WHOLE_SIZE" not in draw:
+    # (a payload a task did not write is cleared; only the slots this draw can start, not a whole shared pair's)
+    if "fallback_payload_words * 4" not in draw or "vkCmdFillBuffer(cmd, f->payload, 0, used, 0)" not in draw:
         raise SystemExit("a payload a task did not write is not cleared before the mesh dispatch")
+    # (every fallback program a recording thread draws shares one pair of buffers: per-program pairs were ~2.2 GB of VRAM
+    # on an RX 5500M and the cause of the fallback's lock-up without enough of it)
+    if "TLS_OBJECT(fallback_buffers, std::vector<FallbackBuffers>)" not in draw:
+        raise SystemExit("the fallback still makes a record and payload pair for every program")
+    if "fallback_buffers()[&p]" in draw:
+        raise SystemExit("the fallback buffers are still keyed by the program")
     if "(!p.fallback || dw().prog == &p)" not in draw or "dw().prog = &p;" not in draw:
         raise SystemExit("a fallback draw reusing its descriptors after a dispatch pushes the dispatch's at the compute bind point")
+    # (the pair is shared by a recording thread's programs (#1383): its clears wait for the last fallback draw's reads)
+    shared = block(draw, "bool fallback_record(VkCommandBuffer cmd, Program& p, const DrawArgs& d) {")
+    if "full_barrier(cmd);" not in shared[shared.index("end_pass(cmd);"):shared.index("vkCmdFillBuffer(cmd, f->records")]:
+        raise SystemExit("a fallback draw clears the shared buffers before the last draw has read them")
     if "VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT" not in VMA.read_text(encoding="utf-8"):
         raise SystemExit("the allocator does not make the fallback's buffers addressable")
     if "st.vk_stage & (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)" \
@@ -157,7 +168,7 @@ def main():
     # (a GPU with mesh shaders: the task and mesh stages are the graphics pipeline's own. Left out of a native mesh program,
     # its pipeline was its fragment stage alone, drew none of the grass, leaves or terrain and then lost the device)
     graphics = block(draw, "VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, "
-                           "VkPrimitiveTopology topo, int part) {")
+                           "VkPrimitiveTopology topo, int part, bool* cold) {")
     if "if (p.fallback && (st.vk_stage & (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_TASK_BIT_EXT |" \
             not in graphics:
         raise SystemExit("build_graphics leaves out the task and mesh stages of native mesh programs too")
@@ -171,6 +182,27 @@ def main():
     if "dev.uses_mesh_fallback(task != nullptr)" not in runtime_mesh or \
             mesh_shader.count("dev.uses_mesh_fallback(by_stage[6] != nullptr)") != 2:
         raise SystemExit("the runtime and both shader preparation paths disagree about task/mesh fallback")
+    # (the fallback's compute pipelines are compiled on a worker, not in the draw: AMD took up to 12 s on one and the game froze
+    # behind it. And before play, in the precompile, with every program translated for the fallback: white foliage until then)
+    if "bool fallback_pipelines_ready(Program& p) {" not in draw:
+        raise SystemExit("the fallback's compute pipelines are compiled in the draw, not on a worker (AMD: seconds each)")
+    ready = block(draw, "bool fallback_pipelines_ready(Program& p) {")
+    if "compare_exchange_strong(none, 1)" not in ready or "jobs_push(std::move(build), true)" not in ready or \
+            "fallback_compute_pipelines(*job);" not in ready:
+        raise SystemExit("the fallback's compute pipelines are compiled in the draw, not on a worker (AMD: seconds each)")
+    record = block(draw, "bool fallback_record(VkCommandBuffer cmd, Program& p, const DrawArgs& d) {")
+    if "fallback_pipelines_ready(p)" not in record or "fallback_compute_pipelines(p)" in record:
+        raise SystemExit("a fallback draw compiles its compute pipelines itself")
+    build = block(draw, "bool fallback_compute_pipelines(Program& p) {")
+    if build.index("guarded_compute(") < build.index("    }\n", build.index("std::lock_guard lk(mu);")):
+        raise SystemExit("the fallback's build holds its lock through the compiles (one program at a time)")
+    precompile = block(draw, "void precompile_run(void (*progress)(size_t done, size_t total)) {")
+    if "else if (p.fallback) fallbacks.push_back(&p);" not in precompile or "fallback_compute_pipelines(p);" not in precompile:
+        raise SystemExit("the precompile leaves the mesh fallback's compute pipelines to play")
+    shader = (ROOT / "gpu" / "vk" / "vk_shader.cpp").read_text(encoding="utf-8")
+    if "(fallbacks && (it->second[0].kind & 4))" not in block(shader, "size_t program_cache_load_some(") or \
+            "}, all_computes, true);" not in precompile:
+        raise SystemExit("the precompile loads only the mesh fallback programs play has drawn (white until compiled)")
     print("mesh shader fallback (compute records and a vertex stage) ok")
 
 
