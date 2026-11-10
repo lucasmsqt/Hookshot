@@ -233,6 +233,40 @@ def state_list(tools):
     return 0
 
 
+def portable(a):
+    """Assemble a standalone preview from this checkout and verified upstream tool parts."""
+    out = os.path.abspath(a.out)
+    shutil.copytree(a.publish, out)
+    copy(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE"))
+    tools = os.path.join(out, "tools")
+    sources = set(tracked("assets", "gpu", "host", "nx2", "scripts", "third_party"))
+    for name in sorted(sources):
+        copy(os.path.join(ROOT, name), os.path.join(tools, *name.split("/")))
+    if state_list(tools) != 0:
+        return 1
+    profile(argparse.Namespace(list=a.list, work=os.path.join(tools, "work")))
+
+    for name in ("python", "emsdk", "cpm", "wgpu-native", "third_party"):
+        archive = named_part(a.list, name)
+        if not archive:
+            sys.exit("no %s part in %s" % (name, a.list))
+        if name == "third_party":
+            count = extract(archive, "HookshotBuilder/tools/third_party/", os.path.join(tools, name),
+                            keep=lambda rel: "third_party/" + rel not in sources and rel.lower().endswith(PREBUILT_EXT))
+        else:
+            count = extract(archive, "HookshotBuilder/tools/" + name + "/", os.path.join(tools, name))
+        if not count:
+            sys.exit("no %s files in %s" % (name, archive))
+
+    if python_packages(a.list, os.path.join(ROOT, "nx2", "prompt_requirements.txt"), tools) != 0:
+        return 1
+
+    llvm_mingw(argparse.Namespace(folder=tools, name=False))
+    os.rename(os.path.join(tools, llvm_spec()[2]), os.path.join(tools, "llvm-mingw"))
+    # Leave tools/version.txt absent so the preview behaves like a source build in the updater.
+    return 0
+
+
 def python_packages(list_path, requirements, tools):
     """The list's Python part with requirements' pins (name==version) installed into tools/python, if it lacks one: by this
     Python's pip, for the part's version and win_amd64 (the part has no pip)"""
@@ -281,8 +315,13 @@ def main():
     s.add_argument("--setup", required=True)
     s.add_argument("--list")
     s.add_argument("--python-packages")
+    s = sub.add_parser("portable", help="assemble a Windows preview with all build tools")
+    s.add_argument("out")
+    s.add_argument("--publish", required=True)
+    s.add_argument("--list", required=True)
     a = p.parse_args()
-    return {"previous": previous, "profile": profile, "llvm-mingw": llvm_mingw, "package": package}[a.cmd](a)
+    return {"previous": previous, "profile": profile, "llvm-mingw": llvm_mingw, "package": package,
+            "portable": portable}[a.cmd](a)
 
 
 if __name__ == "__main__":

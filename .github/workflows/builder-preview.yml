@@ -1,0 +1,94 @@
+name: Hookshot Builder preview
+
+on:
+  push:
+    branches: [release/builder-preview]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    if: github.repository == 'lucasmsqt/Hookshot'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Read the official tool manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -I -B scripts/release_parts.py previous "$RUNNER_TEMP/setup.txt" --repo NotRexed/Hookshot
+          python -I -B scripts/release_parts.py profile "$RUNNER_TEMP/setup.txt" work
+
+      - name: Publish the Windows app
+        run: |
+          dotnet publish builder/HookshotBuilder/HookshotBuilder.csproj --configuration Release \
+            -p:Version="0.0.0-preview.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+            -p:NuGetAudit=false --output "$RUNNER_TEMP/publish"
+
+      - name: Assemble the portable Builder
+        run: |
+          package="$RUNNER_TEMP/HookshotBuilder"
+          python -I -B scripts/release_parts.py portable "$package" \
+            --publish "$RUNNER_TEMP/publish" --list "$RUNNER_TEMP/setup.txt"
+          test -f "$package/HookshotBuilder.exe"
+          "$package/tools/python/python.exe" -I -B -c "import lz4, numpy, capstone, unicorn, zstandard"
+          "$package/tools/llvm-mingw/bin/clang.exe" --version
+
+      - name: Check that the packaged Vulkan source compiles
+        run: |
+          package="$RUNNER_TEMP/HookshotBuilder"
+          cd "$package/tools"
+          OOT_WORK="$RUNNER_TEMP/vk-check" RX_CPM="$package/tools/cpm" HOOKSHOT_MINGW="$package/tools/llvm-mingw" \
+            RX_VK_ONLY=1 RX_RELEASE=1 python -I -B nx2/build.py --standalone --jobs "$NUMBER_OF_PROCESSORS"
+          test -f "$RUNNER_TEMP/vk-check/sa/build/hookshot_vk.dll"
+
+      - name: Zip the Builder
+        run: |
+          cd "$RUNNER_TEMP"
+          python -I -B -m zipfile -c HookshotBuilder-preview-win-x64.zip HookshotBuilder
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: HookshotBuilder-preview
+          path: ${{ runner.temp }}/HookshotBuilder-preview-win-x64.zip
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: HookshotBuilder-preview
+      - name: Publish the prerelease
+        run: |
+          asset=HookshotBuilder-preview-win-x64.zip
+          tag="builder-preview-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sha256sum "$asset" > "$asset.sha256"
+          printf 'Windows x64 test build from commit `%s`.\n\n' "$GITHUB_SHA" > notes.md
+          printf 'Download `%s`, extract the entire ZIP, and open `HookshotBuilder.exe`.\n' "$asset" >> notes.md
+          printf '%s\n' \
+            'Select your own supported game dump and a new game output folder.' \
+            'The ZIP contains the Builder, source code and build tools. The Builder compiles the game locally.' >> notes.md
+          gh release create "$tag" "$asset" "$asset.sha256" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "Hookshot Builder preview (${GITHUB_SHA:0:7})" --notes-file notes.md
