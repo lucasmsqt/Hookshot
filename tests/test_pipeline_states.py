@@ -145,24 +145,36 @@ def main():
         # (unpacked), none when there are none
         make_game = load("make_game_under_test", ROOT / "nx2" / "make_game.py")
         game = os.path.join(d, "game")
+        local_work = os.path.join(d, "local-work")
         os.makedirs(game)
+        os.makedirs(local_work)
         make_game.ROOT = d
-        make_game.ship_state_list(game)
+        make_game.ship_state_list(game, local_work)
         if os.listdir(game):
             raise SystemExit("a list was shipped with none in assets/")
         src = os.path.join(d, *tool.SOURCES)
         os.makedirs(os.path.join(src, tool.CONTRIB))
         os.replace(xz, os.path.join(src, tool.CONTRIB, "a" + tool.EXT))
         tool.write(os.path.join(src, tool.TOUR), [rec(9, 9, 9), rec(1, 2, 4)])
-        make_game.ship_state_list(game)
+        make_game.ship_state_list(game, local_work)
         shipped = os.path.join(game, "hookshot_pipeline_states_shipped.bin")
         want = [rec(9, 9, 9), rec(1, 2, 4), rec(1, 2, 3), rec(5, 0, 3)]   # (the tour's first, each pipeline once)
         if open(shipped, "rb").read(8) != tool.MAGIC or tool.read(shipped) != want:
             raise SystemExit("make_game did not merge assets/pipeline_states/ beside the game")
+        local = Path(local_work, "pipeline_states.bin")
+        local.write_bytes(head + rec(6, 7, 3))
+        make_game.ship_state_list(game, local_work)
+        if tool.read(shipped) != [rec(6, 7, 3)]:
+            raise SystemExit("make_game did not use the local --work pipeline state list")
+        local.write_bytes(b"invalid")
+        make_game.ship_state_list(game, local_work)
+        if tool.read(shipped) != want:
+            raise SystemExit("make_game did not fall back to the bundled lists")
+        local.unlink()
         # one that does not read (another format, damaged) is left out, the others shipped, and the build goes on
         with open(os.path.join(src, tool.TOUR), "wb") as f:
             f.write(b"HKSTATE9" + struct.pack("<I", 600))
-        make_game.ship_state_list(game)
+        make_game.ship_state_list(game, local_work)
         if tool.read(shipped) != merged:
             raise SystemExit("make_game did not leave out a source that does not read")
     print("pipeline state list: records of both versions, conversion, merge and shipping ok")
